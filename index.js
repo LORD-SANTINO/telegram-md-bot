@@ -9,7 +9,7 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 bot.use(session());
 
 // MongoDB connection
-const mongoClient = new MongoClient(process.env.MONGODB_URI);
+const mongoClient = new MongoClient(process.env.MONGO_URI);
 let db, usersCollection, groupsCollection, settingsCollection;
 
 // Connect to MongoDB
