@@ -1,7 +1,7 @@
 {
   "name": "telegram-md-bot",
   "version": "1.0.0",
-  "description": "A full-featured Telegram MD bot with group management tools",
+  "description": "A personal Telegram MD bot similar to WhatsApp MD",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
