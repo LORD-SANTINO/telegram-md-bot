@@ -14,13 +14,12 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 // Session middleware for user data
 bot.use(session());
 
-// MongoDB connection - with proper error handling
+// MongoDB connection
 let mongoClient;
-let db, usersCollection, groupsCollection, settingsCollection;
+let db, usersCollection, sessionsCollection, settingsCollection;
 
-// Connect to MongoDB only if URI is provided
+// Connect to MongoDB
 async function connectDB() {
-  // Use MONGO_URL (Railway's standard variable name) or MONGODB_URI
   const mongoUri = process.env.MONGO_URL || process.env.MONGODB_URI;
   
   if (!mongoUri) {
@@ -30,9 +29,6 @@ async function connectDB() {
   
   try {
     console.log('🔗 Attempting to connect to MongoDB...');
-    console.log('📋 Connection string:', mongoUri.replace(/:[^:]*@/, ':********@')); // Hide password in logs
-    
-    // Add connection options for better stability
     const options = {
       useNewUrlParser: true,
       useUnifiedTopology: true,
@@ -44,16 +40,19 @@ async function connectDB() {
     mongoClient = new MongoClient(mongoUri, options);
     await mongoClient.connect();
     
-    // Use the database name from the connection string or default to 'telegram_md_bot'
     const dbName = mongoUri.split('/').pop().split('?')[0] || 'telegram_md_bot';
     db = mongoClient.db(dbName);
     
     usersCollection = db.collection('users');
-    groupsCollection = db.collection('groups');
+    sessionsCollection = db.collection('sessions');
     settingsCollection = db.collection('settings');
     
     console.log('✅ Connected to MongoDB successfully');
-    console.log('💾 Using database:', dbName);
+    
+    // Create indexes
+    await usersCollection.createIndex({ _id: 1 });
+    await sessionsCollection.createIndex({ userId: 1 });
+    
   } catch (error) {
     console.error('❌ MongoDB connection error:', error.message);
     console.warn('⚠️  Running without database functionality');
@@ -70,10 +69,9 @@ async function initSettings() {
       await settingsCollection.insertOne({
         _id: 'global',
         autoreact: true,
-        welcome_message: true,
-        antispam: true,
-        max_warnings: 3,
-        autoreact_emojis: ['👍', '❤️', '🔥']
+        autoreact_emojis: ['👍', '❤️', '🔥'],
+        max_sessions: 3,
+        allow_broadcast: true
       });
       console.log('✅ Default settings initialized');
     }
@@ -88,9 +86,20 @@ function isAdmin(ctx) {
   return admins.includes(ctx.from.id.toString());
 }
 
-// Update your start command to handle missing DB
+// Format uptime function
+function formatUptime(seconds) {
+  const days = Math.floor(seconds / (3600 * 24));
+  const hours = Math.floor((seconds % (3600 * 24)) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  
+  return `${days}d ${hours}h ${minutes}m`;
+}
+
+// ==================== PERSONAL BOT COMMANDS ====================
+
+// Start command
 bot.start(async (ctx) => {
-  // Save user to database if available
+  // Save user to database
   if (usersCollection) {
     try {
       await usersCollection.updateOne(
@@ -100,7 +109,8 @@ bot.start(async (ctx) => {
             username: ctx.from.username,
             first_name: ctx.from.first_name,
             last_name: ctx.from.last_name,
-            joined: new Date()
+            joined: new Date(),
+            is_premium: ctx.from.is_premium || false
           } 
         },
         { upsert: true }
@@ -111,35 +121,258 @@ bot.start(async (ctx) => {
   }
   
   ctx.reply(
-    `Welcome to MD Bot ${ctx.from.first_name}! 🤖\n\n` +
-    `I'm a powerful group management bot with many features.\n` +
+    `👋 Welcome ${ctx.from.first_name}! I'm your personal MD bot for Telegram.\n\n` +
+    `I can help you automate tasks, manage messages, and more!\n\n` +
+    `🔧 *Available Features:*\n` +
+    `• Auto-reply to messages\n` +
+    `• Auto-reactions to posts\n` +
+    `• Message scheduling\n` +
+    `• Chat management\n` +
+    `• And much more!\n\n` +
     `Use /help to see all available commands.`,
-    Markup.keyboard([
-      ['📊 Bot Status', '🛠️ Group Tools'],
-      ['⚙️ Settings', '❓ Help']
-    ]).resize()
+    { parse_mode: 'Markdown' }
   );
 });
 
-// Update stats command to handle missing DB
+// Help command
+bot.help((ctx) => {
+  const helpText = `
+🤖 *PERSONAL MD BOT COMMANDS* 🤖
+
+*🔧 Core Features:*
+/start - Start the bot
+/help - Show this help message
+/stats - Show your statistics
+/ping - Check bot response time
+
+*⚙️ Settings:*
+/autoreact [on/off] - Toggle auto reactions
+/autoreply [on/off] - Toggle auto replies
+/setautoreply [message] - Set auto reply message
+/session - Manage your sessions
+
+*📨 Message Tools:*
+/schedule [time] [message] - Schedule a message
+/broadcast [message] - Broadcast to your chats (Admin)
+/copy - Copy message format
+/quote - Quote a message
+
+*🎨 Content Tools:*
+/sticker [query] - Search for stickers
+/gif [query] - Search for GIFs
+/font [text] - Change text font
+/tts [text] - Text to speech
+
+*🛡️ Privacy:*
+/block - Block a user
+/unblock - Unblock a user
+/ignore - Ignore a chat
+/mute - Mute a chat
+
+*👨‍💻 Admin Only:*
+/broadcast [message] - Broadcast to all users
+/stats - Bot statistics
+/restart - Restart bot
+
+Use /command for more info about a specific command.
+  `;
+  
+  ctx.replyWithMarkdown(helpText);
+});
+
+// ==================== AUTO FEATURES ====================
+
+// Auto-react to messages if enabled
+bot.on('message', async (ctx) => {
+  try {
+    if (settingsCollection) {
+      const settings = await settingsCollection.findOne({ _id: 'global' });
+      if (settings && settings.autoreact && ctx.message.text) {
+        // React with random emoji from settings
+        const randomEmoji = settings.autoreact_emojis[
+          Math.floor(Math.random() * settings.autoreact_emojis.length)
+        ];
+        
+        // Try to react to the message
+        try {
+          await ctx.react(randomEmoji);
+        } catch (error) {
+          // Reaction might not be supported
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error in message handler:', error);
+  }
+});
+
+// ==================== PERSONAL TOOLS COMMANDS ====================
+
+// Auto-react toggle
+bot.command('autoreact', async (ctx) => {
+  const args = ctx.message.text.split(' ');
+  if (args.length < 2) {
+    const settings = await settingsCollection.findOne({ _id: 'global' });
+    return ctx.reply(`Auto-reactions are currently ${settings.autoreact ? 'ON' : 'OFF'}. Use /autoreact on or /autoreact off`);
+  }
+  
+  const state = args[1].toLowerCase();
+  if (state !== 'on' && state !== 'off') {
+    return ctx.reply('Please specify "on" or "off". Usage: /autoreact on');
+  }
+  
+  if (settingsCollection) {
+    await settingsCollection.updateOne(
+      { _id: 'global' },
+      { $set: { autoreact: state === 'on' } }
+    );
+  }
+  
+  ctx.reply(`✅ Auto-reactions have been turned ${state.toUpperCase()}.`);
+});
+
+// Schedule message command
+bot.command('schedule', async (ctx) => {
+  const args = ctx.message.text.split(' ');
+  if (args.length < 3) {
+    return ctx.reply('Please specify time and message. Usage: /schedule 5m Hello world!');
+  }
+  
+  const time = args[1];
+  const message = args.slice(2).join(' ');
+  
+  // Parse time (e.g., 5m, 1h, 30s)
+  let milliseconds = 0;
+  if (time.endsWith('s')) {
+    milliseconds = parseInt(time) * 1000;
+  } else if (time.endsWith('m')) {
+    milliseconds = parseInt(time) * 60 * 1000;
+  } else if (time.endsWith('h')) {
+    milliseconds = parseInt(time) * 60 * 60 * 1000;
+  } else {
+    return ctx.reply('Please specify time with unit (s, m, h). Example: 5m, 1h, 30s');
+  }
+  
+  ctx.reply(`✅ Message scheduled to be sent in ${time}.`);
+  
+  // Schedule the message
+  setTimeout(async () => {
+    try {
+      await ctx.reply(`⏰ Scheduled message: ${message}`);
+    } catch (error) {
+      console.error('Error sending scheduled message:', error);
+    }
+  }, milliseconds);
+});
+
+// Font changer command
+bot.command('font', async (ctx) => {
+  const text = ctx.message.text.replace('/font', '').trim();
+  if (!text) {
+    return ctx.reply('Please provide text. Usage: /font Hello world');
+  }
+  
+  // Convert text to different font styles
+  const fonts = {
+    bold: `*${text}*`,
+    italic: `_${text}_`,
+    mono: '```' + text + '```',
+    strike: `~${text}~`,
+    underline: `__${text}__`
+  };
+  
+  let response = `🔠 *Font Styles:*\n\n`;
+  response += `*Bold:* ${fonts.bold}\n`;
+  response += `_Italic:_ ${fonts.italic}\n`;
+  response += `Monospace: ${fonts.mono}\n`;
+  response += `~Strikethrough:~ ${fonts.strike}\n`;
+  response += `__Underline:__ ${fonts.underline}`;
+  
+  ctx.replyWithMarkdown(response);
+});
+
+// TTS command
+bot.command('tts', async (ctx) => {
+  const text = ctx.message.text.replace('/tts', '').trim();
+  if (!text) {
+    return ctx.reply('Please provide text. Usage: /tts Hello world');
+  }
+  
+  // Simple TTS simulation
+  ctx.replyWithMarkdown(`🗣️ *Text to Speech:*\n\n"${text}"\n\n*(This is a simulation. In a real implementation, this would use TTS API)*`);
+});
+
+// ==================== ADMIN COMMANDS ====================
+
+// Broadcast command (admin only)
+bot.command('broadcast', async (ctx) => {
+  if (!isAdmin(ctx)) {
+    return ctx.reply('❌ This command is only available for admins.');
+  }
+  
+  const message = ctx.message.text.replace('/broadcast', '').trim();
+  if (!message) {
+    return ctx.reply('Please provide a message to broadcast. Usage: /broadcast Your message here');
+  }
+  
+  try {
+    if (usersCollection) {
+      const users = await usersCollection.find({}).toArray();
+      let successCount = 0;
+      let failCount = 0;
+      
+      ctx.reply(`📢 Starting broadcast to ${users.length} users...`);
+      
+      for (const user of users) {
+        try {
+          await ctx.telegram.sendMessage(user._id, `📢 *BROADCAST FROM ADMIN:*\n\n${message}`, { parse_mode: 'Markdown' });
+          successCount++;
+          // Small delay to avoid hitting rate limits
+          await new Promise(resolve => setTimeout(resolve, 100));
+        } catch (error) {
+          console.error(`Failed to send to user ${user._id}:`, error);
+          failCount++;
+        }
+      }
+      
+      ctx.reply(`✅ Broadcast completed!\nSuccess: ${successCount}\nFailed: ${failCount}`);
+    } else {
+      ctx.reply('❌ Database not available for broadcast.');
+    }
+  } catch (error) {
+    console.error('Broadcast error:', error);
+    ctx.reply('❌ An error occurred during broadcast.');
+  }
+});
+
+// ==================== UTILITY COMMANDS ====================
+
+// Ping command
+bot.command('ping', (ctx) => {
+  ctx.reply(`🏓 Pong! Bot is alive and responding.\n⏱️ Response time: ${new Date().getTime() - ctx.message.date * 1000}ms`);
+});
+
+// Stats command
 bot.command('stats', async (ctx) => {
   let userCount = 'N/A';
-  let groupCount = 'N/A';
+  let sessionCount = 'N/A';
   
-  if (usersCollection && groupsCollection) {
+  if (usersCollection && sessionsCollection) {
     try {
       userCount = await usersCollection.countDocuments();
-      groupCount = await groupsCollection.countDocuments();
+      sessionCount = await sessionsCollection.countDocuments();
     } catch (error) {
       console.error('Database error in stats:', error.message);
     }
   }
   
   const statsText = `
-📊 *BOT STATISTICS*
+📊 *YOUR STATISTICS*
 
-👥 Users: ${userCount}
-👥 Groups: ${groupCount}
+👤 Your ID: ${ctx.from.id}
+📅 Joined: ${new Date().toLocaleDateString()}
+👥 Total Users: ${userCount}
+🔗 Active Sessions: ${sessionCount}
 ⚡ Uptime: ${formatUptime(process.uptime())}
 ${!process.env.MONGO_URL ? '\n⚠️ *Running in memory mode (no database)*' : ''}
   `;
@@ -147,62 +380,41 @@ ${!process.env.MONGO_URL ? '\n⚠️ *Running in memory mode (no database)*' : '
   ctx.replyWithMarkdown(statsText);
 });
 
-// Add a simple in-memory storage fallback
-const memoryStorage = {
-  users: new Map(),
-  groups: new Map(),
-  settings: {
-    autoreact: true,
-    welcome_message: true,
-    autoreact_emojis: ['👍', '❤️', '🔥']
-  }
-};
-
-// Format uptime function
-function formatUptime(seconds) {
-  const days = Math.floor(seconds / (3600 * 24));
-  const hours = Math.floor((seconds % (3600 * 24)) / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  
-  return `${days}d ${hours}h ${minutes}m`;
-}
-
-// Add basic commands to test functionality
-bot.command('ping', (ctx) => {
-  ctx.reply('🏓 Pong! Bot is alive and responding.');
-});
-
-bot.command('testdb', async (ctx) => {
-  if (usersCollection) {
-    try {
-      const userCount = await usersCollection.countDocuments();
-      ctx.reply(`✅ Database connection working! Users in DB: ${userCount}`);
-    } catch (error) {
-      ctx.reply(`❌ Database error: ${error.message}`);
-    }
+// Session management
+bot.command('session', async (ctx) => {
+  if (sessionsCollection) {
+    const userSessions = await sessionsCollection.countDocuments({ userId: ctx.from.id });
+    const maxSessions = 3; // Default max sessions
+    
+    ctx.replyWithMarkdown(
+      `🔗 *Session Management*\n\n` +
+      `Active sessions: ${userSessions}/${maxSessions}\n\n` +
+      `*Commands:*\n` +
+      `/session list - List your sessions\n` +
+      `/session kill [id] - Terminate a session\n` +
+      `/session killall - Terminate all sessions`
+    );
   } else {
-    ctx.reply('❌ No database connection available');
+    ctx.reply('❌ Session management not available (database connection issue).');
   }
 });
+
+// ==================== START THE BOT ====================
 
 // Start the bot
 async function startBot() {
   try {
-    console.log('🔧 Starting MD Telegram Bot...');
+    console.log('🔧 Starting Personal MD Telegram Bot...');
     console.log('🤖 Bot token:', process.env.BOT_TOKEN ? '✅ Provided' : '❌ Missing');
     
     const mongoUri = process.env.MONGO_URL || process.env.MONGODB_URI;
     console.log('🗄️  MongoDB URI:', mongoUri ? '✅ Provided' : '❌ Missing - using memory storage');
     
-    if (mongoUri) {
-      console.log('📋 Connection string:', mongoUri.replace(/:[^:]*@/, ':********@')); // Hide password
-    }
-    
     await connectDB();
     await initSettings();
     
     bot.launch().then(() => {
-      console.log('✅ MD Telegram Bot is running!');
+      console.log('✅ Personal MD Telegram Bot is running!');
     });
     
     // Enable graceful stop
