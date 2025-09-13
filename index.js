@@ -8,13 +8,10 @@ if (!process.env.BOT_TOKEN) {
 }
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
-
-// Session middleware
 bot.use(session());
 
-// MongoDB client & collections
 let mongoClient;
-let db, usersCollection;
+let db, usersCollection, linksCollection;
 
 async function connectDB() {
   const mongoUri = process.env.MONGO_URL;
@@ -35,21 +32,20 @@ async function connectDB() {
     const dbName = mongoUri.split('/').pop().split('?')[0] || 'telegram_md_bot';
     db = mongoClient.db(dbName);
     usersCollection = db.collection('users');
+    linksCollection = db.collection('device_links');
+    await linksCollection.createIndex({ userId: 1 }, { unique: true });
     console.log('MongoDB connected:', db.databaseName);
   } catch (err) {
     console.error('MongoDB connection error:', err.message);
   }
 }
 
-// Pass commands on to handlers, react only on non-command messages
 bot.on('message', async (ctx, next) => {
   console.log('Received message:', ctx.message.text);
   if (ctx.message.text && ctx.message.text.startsWith('/')) return next();
-  // Example auto-reaction disabled here to keep it simple
   return next();
 });
 
-// /start command
 bot.start(async (ctx) => {
   console.log('/start invoked by', ctx.from.id);
   if (usersCollection) {
@@ -69,23 +65,53 @@ bot.start(async (ctx) => {
   ctx.reply(`Hello, ${ctx.from.first_name}! Welcome to the bot. Use /help to get commands.`);
 });
 
-// /help command
 bot.help((ctx) => {
   console.log('/help invoked by', ctx.from.id);
   ctx.reply(
     '/start - Start the bot\n' +
       '/help - Show help\n' +
-      '/ping - Test bot response\n'
+      '/ping - Test bot response\n' +
+      '/connect - Generate device linking code\n'
   );
 });
 
-// /ping command
 bot.command('ping', (ctx) => {
   console.log('/ping invoked by', ctx.from.id);
   ctx.reply('Pong! Bot is alive and responding.');
 });
 
-// Start the bot
+// /connect command
+bot.command('connect', async (ctx) => {
+  if (!linksCollection) {
+    return ctx.reply('❌ Database connection required for linking your device.');
+  }
+
+  try {
+    const existing = await linksCollection.findOne({ userId: ctx.from.id });
+    if (existing) {
+      return ctx.reply(`🔗 You are already linked! Your code: *${existing.code}*`, { parse_mode: 'Markdown' });
+    }
+
+    const linkingCode = Math.floor(100000 + Math.random() * 900000).toString();
+
+    await linksCollection.updateOne(
+      { userId: ctx.from.id },
+      { $set: { userId: ctx.from.id, code: linkingCode, linkedAt: new Date() } },
+      { upsert: true }
+    );
+
+    await ctx.reply(
+      `🔗 Your device linking code has been generated:\n\n` +
+      `*${linkingCode}*\n\n` +
+      `Use this code in your app or website to link your device with this bot.`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (error) {
+    console.error('Error in /connect:', error);
+    ctx.reply('❌ Failed to generate linking code.');
+  }
+});
+
 async function startBot() {
   try {
     await connectDB();
@@ -98,6 +124,5 @@ async function startBot() {
 
 startBot();
 
-// Graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
